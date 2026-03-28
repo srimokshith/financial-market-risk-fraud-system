@@ -49,6 +49,12 @@ class MarketRiskFraudSystem:
         prepared_data = self.prepare_data()
         diagnostics = self.run_diagnostics(prepared_data)
 
+        # Traditional Event Study Analysis
+        car_summary, car_detail = self.run_comprehensive_event_study(prepared_data)
+        model_comparison = self.compare_volatility_models(prepared_data)
+        fx_correlation = self.analyze_fx_stock_correlation(prepared_data)
+
+        # Fraud Detection & Risk Analytics
         feature_frame = self.engineer_features(prepared_data)
         feature_frame, garch_summary = self.add_garch_feature(feature_frame, store_model=True)
         feature_frame, anomaly_summary = self.add_anomaly_detection(feature_frame, fit=True)
@@ -57,6 +63,13 @@ class MarketRiskFraudSystem:
         risk_frame = feature_frame.dropna(subset=["risk_score"]).copy()
         event_summary, event_detail = self.run_event_analysis(risk_frame)
         figures = self.create_visualizations(risk_frame, event_summary, event_detail)
+        
+        # Add new visualizations
+        if not car_detail.empty:
+            figures["car_progression"] = self._plot_car_progression(car_detail)
+        if not model_comparison.empty:
+            figures["model_comparison"] = self._plot_model_comparison(model_comparison)
+        figures["normalized_price_paths"] = self._plot_normalized_price_paths(prepared_data)
 
         realtime_summary = self.simulate_realtime_monitor() if run_realtime else {
             "status": "skipped",
@@ -87,10 +100,21 @@ class MarketRiskFraudSystem:
             business_explanation=business_explanation,
             figures=figures,
         )
+        
+        # Save new outputs
+        car_summary.to_csv(self.config.output_dir / "car_summary.csv", index=False)
+        if not car_detail.empty:
+            car_detail.to_csv(self.config.output_dir / "car_detail.csv")
+        model_comparison.to_csv(self.config.output_dir / "model_comparison.csv", index=False)
+        fx_correlation.to_csv(self.config.output_dir / "fx_correlation.csv", index=False)
 
         return {
             "prepared_data": prepared_data,
             "diagnostics": diagnostics,
+            "car_summary": car_summary,
+            "car_detail": car_detail,
+            "model_comparison": model_comparison,
+            "fx_correlation": fx_correlation,
             "risk_frame": risk_frame,
             "event_summary": event_summary,
             "event_detail": event_detail,
@@ -999,6 +1023,197 @@ This upgraded project is useful in both risk management and fraud analytics:
         if anomaly_frequency > 0:
             return "Isolated anomaly signals appeared during the election window."
         return "The election window was comparatively stable in the scored sample."
+
+    def calculate_abnormal_returns(
+        self, data: pd.DataFrame, election_date: pd.Timestamp
+    ) -> dict[str, Any]:
+        """Calculate CAR using Market Model (NIFTY vs SENSEX)."""
+        estimation_start = election_date - pd.Timedelta(days=120)
+        estimation_end = election_date - pd.Timedelta(days=21)
+        
+        estimation_data = data.loc[estimation_start:estimation_end].copy()
+        if len(estimation_data) < 30 or "SENSEX_Return" not in estimation_data.columns:
+            raise ValueError("Insufficient data for market model estimation")
+        
+        X = estimation_data[["SENSEX_Return"]].dropna()
+        y = estimation_data["NIFTY_Return"].loc[X.index]
+        model = sm.OLS(y, sm.add_constant(X)).fit()
+        
+        alpha, beta = model.params["const"], model.params["SENSEX_Return"]
+        
+        event_start = election_date - pd.Timedelta(days=20)
+        event_end = election_date + pd.Timedelta(days=40)
+        event_data = data.loc[event_start:event_end].copy()
+        
+        event_data["Expected_Return"] = alpha + beta * event_data["SENSEX_Return"]
+        event_data["Abnormal_Return"] = event_data["NIFTY_Return"] - event_data["Expected_Return"]
+        event_data["CAR"] = event_data["Abnormal_Return"].cumsum()
+        
+        short_window = event_data.loc[
+            election_date - pd.Timedelta(days=5) : election_date + pd.Timedelta(days=5)
+        ]
+        
+        return {
+            "election_date": election_date,
+            "alpha": float(alpha),
+            "beta": float(beta),
+            "r_squared": float(model.rsquared),
+            "election_day_return": float(event_data.loc[election_date, "NIFTY_Return"]),
+            "election_day_AR": float(event_data.loc[election_date, "Abnormal_Return"]),
+            "CAR_short": float(short_window["Abnormal_Return"].sum()),
+            "CAR_long": float(event_data["Abnormal_Return"].sum()),
+            "event_data": event_data,
+        }
+
+    def run_comprehensive_event_study(
+        self, data: pd.DataFrame
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Run complete event study with CAR for all elections."""
+        all_results, all_event_data = [], []
+        
+        for election_date in self.config.election_dates:
+            try:
+                result = self.calculate_abnormal_returns(data, election_date)
+                all_results.append({
+                    "Election_Date": election_date.strftime("%Y-%m-%d"),
+                    "Alpha": result["alpha"],
+                    "Beta": result["beta"],
+                    "R_Squared": result["r_squared"],
+                    "Election_Day_Return": result["election_day_return"],
+                    "Election_Day_AR": result["election_day_AR"],
+                    "CAR_Short_Window": result["CAR_short"],
+                    "CAR_Long_Window": result["CAR_long"],
+                })
+                
+                event_df = result["event_data"].copy()
+                event_df["Election_Date"] = election_date
+                all_event_data.append(event_df)
+            except Exception as e:
+                self._record_note(f"Skipped {election_date}: {str(e)}")
+        
+        return pd.DataFrame(all_results), pd.concat(all_event_data, ignore_index=False) if all_event_data else pd.DataFrame()
+
+    def compare_volatility_models(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Compare ARCH, GARCH, EGARCH, GJR-GARCH using BIC."""
+        series = data["NIFTY_Return"].dropna()
+        
+        models = {
+            "ARCH(1)": arch_model(series, vol="ARCH", p=1, rescale=False),
+            "GARCH(1,1)": arch_model(series, vol="GARCH", p=1, q=1, rescale=False),
+            "EGARCH(1,1)": arch_model(series, vol="EGARCH", p=1, q=1, rescale=False),
+            "GJR-GARCH(1,1)": arch_model(series, vol="GARCH", p=1, o=1, q=1, rescale=False),
+        }
+        
+        results = []
+        for name, model in models.items():
+            try:
+                fit = model.fit(disp="off")
+                std_resid = fit.std_resid
+                lb_test = acorr_ljungbox(std_resid, lags=[10], return_df=True)
+                arch_test = het_arch(std_resid, nlags=10)
+                
+                results.append({
+                    "Model": name,
+                    "AIC": float(fit.aic),
+                    "BIC": float(fit.bic),
+                    "LogLikelihood": float(fit.loglikelihood),
+                    "LjungBox_pvalue": float(lb_test["lb_pvalue"].iloc[0]),
+                    "ARCH_pvalue": float(arch_test[1]),
+                })
+            except:
+                continue
+        
+        return pd.DataFrame(results).sort_values("BIC")
+
+    def analyze_fx_stock_correlation(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Analyze NIFTY vs USD/INR correlation during election windows."""
+        correlations = []
+        
+        for election_date in self.config.election_dates:
+            window_start = election_date - pd.Timedelta(days=20)
+            window_end = election_date + pd.Timedelta(days=40)
+            window_data = data.loc[window_start:window_end, ["NIFTY_Return", "USDINR_Return"]].dropna()
+            
+            if len(window_data) > 10:
+                corr = window_data.corr().iloc[0, 1]
+                correlations.append({
+                    "Election_Date": election_date.strftime("%Y-%m-%d"),
+                    "Correlation": float(corr),
+                    "Window_Size": len(window_data),
+                })
+        
+        return pd.DataFrame(correlations).sort_values("Correlation", key=abs, ascending=False)
+
+    def _plot_normalized_price_paths(self, data: pd.DataFrame) -> str:
+        """Plot normalized price paths for all elections."""
+        fig, ax = plt.subplots(figsize=(15, 7))
+        
+        for election_date in self.config.election_dates:
+            window_start = election_date - pd.Timedelta(days=20)
+            window_end = election_date + pd.Timedelta(days=40)
+            window_data = data.loc[window_start:window_end, "NIFTY_Close"].dropna()
+            
+            if len(window_data) > 10 and election_date in window_data.index:
+                election_price = window_data.loc[election_date]
+                normalized = (window_data / election_price) * 100
+                days_from_election = (normalized.index - election_date).days
+                
+                ax.plot(
+                    days_from_election,
+                    normalized.values,
+                    label=election_date.strftime("%Y"),
+                    alpha=0.7,
+                    linewidth=2,
+                )
+        
+        ax.axvline(0, color="red", linestyle="--", label="Election Day", linewidth=2)
+        ax.set_xlabel("Days from Election")
+        ax.set_ylabel("Normalized Price (Election Day = 100)")
+        ax.set_title("Normalized NIFTY Price Paths Across Elections")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        return self._save_figure(fig, "normalized_price_paths.png")
+
+    def _plot_car_progression(self, car_detail: pd.DataFrame) -> str:
+        """Plot CAR progression for all elections."""
+        fig, ax = plt.subplots(figsize=(15, 7))
+        
+        for election_date in self.config.election_dates:
+            election_data = car_detail[car_detail["Election_Date"] == election_date]
+            if not election_data.empty and "CAR" in election_data.columns:
+                days_from_election = (election_data.index - election_date).days
+                ax.plot(
+                    days_from_election,
+                    election_data["CAR"],
+                    label=election_date.strftime("%Y"),
+                    alpha=0.7,
+                    linewidth=2,
+                )
+        
+        ax.axvline(0, color="red", linestyle="--", label="Election Day", linewidth=2)
+        ax.axhline(0, color="black", linestyle="-", alpha=0.3)
+        ax.set_xlabel("Days from Election")
+        ax.set_ylabel("Cumulative Abnormal Return (%)")
+        ax.set_title("CAR Progression Across Elections")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        return self._save_figure(fig, "car_progression.png")
+
+    def _plot_model_comparison(self, model_comparison: pd.DataFrame) -> str:
+        """Plot BIC comparison of volatility models."""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        ax.barh(model_comparison["Model"], model_comparison["BIC"], color="steelblue")
+        ax.set_xlabel("BIC (lower is better)")
+        ax.set_title("Volatility Model Comparison")
+        ax.invert_yaxis()
+        
+        for i, (model, bic) in enumerate(zip(model_comparison["Model"], model_comparison["BIC"])):
+            ax.text(bic, i, f" {bic:.1f}", va="center")
+        
+        return self._save_figure(fig, "model_comparison.png")
 
     def _record_note(self, message: str) -> None:
         if message not in self.notes:

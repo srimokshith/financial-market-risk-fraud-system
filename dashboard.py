@@ -39,6 +39,9 @@ results = run_cached_analysis(run_realtime=run_realtime)
 
 risk_frame: pd.DataFrame = results["risk_frame"].copy()
 event_summary: pd.DataFrame = results["event_summary"].copy()
+car_summary: pd.DataFrame = results.get("car_summary", pd.DataFrame())
+model_comparison: pd.DataFrame = results.get("model_comparison", pd.DataFrame())
+fx_correlation: pd.DataFrame = results.get("fx_correlation", pd.DataFrame())
 notes: list[str] = results["notes"]
 realtime = results["realtime_summary"]
 
@@ -57,6 +60,7 @@ fraud_alert = (
     "Yes" if realtime.get("status") == "available" and realtime.get("fraud_alert") else "No"
 )
 
+# Main Metrics
 metric_cols = st.columns(4)
 metric_cols[0].metric("Current Risk Score", f"{current_score:.2f}")
 metric_cols[1].metric("Current Risk Category", str(current_category))
@@ -71,6 +75,36 @@ if realtime.get("status") == "available":
     )
 elif realtime.get("status") == "unavailable":
     st.warning(realtime.get("reason", "Real-time simulation is unavailable."))
+
+# Event Study Section
+st.header("📊 Traditional Event Study Analysis")
+
+if not car_summary.empty:
+    st.subheader("Cumulative Abnormal Returns (CAR) Summary")
+    st.dataframe(car_summary, use_container_width=True)
+    
+    # Highlight best/worst elections
+    best_car = car_summary.loc[car_summary["CAR_Long_Window"].idxmax()]
+    worst_car = car_summary.loc[car_summary["CAR_Long_Window"].idxmin()]
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Highest CAR Election", best_car["Election_Date"], f"{best_car['CAR_Long_Window']:.2f}%")
+    with col2:
+        st.metric("Lowest CAR Election", worst_car["Election_Date"], f"{worst_car['CAR_Long_Window']:.2f}%")
+
+if not model_comparison.empty:
+    st.subheader("Volatility Model Comparison")
+    st.dataframe(model_comparison, use_container_width=True)
+    best_model = model_comparison.iloc[0]["Model"]
+    st.success(f"✅ Best Model (lowest BIC): **{best_model}**")
+
+if not fx_correlation.empty:
+    st.subheader("NIFTY vs USD/INR Correlation During Elections")
+    st.dataframe(fx_correlation, use_container_width=True)
+
+# Fraud Detection Section
+st.header("🚨 Fraud Detection & Risk Analytics")
 
 if notes:
     with st.expander("Implementation Notes"):
