@@ -1071,11 +1071,13 @@ This upgraded project is useful in both risk management and fraud analytics:
         """Run complete event study with CAR for all elections."""
         all_results, all_event_data = [], []
         
-        for election_date in self.config.election_dates:
+        for year, date_str in self.config.election_dates.items():
+            election_date = pd.Timestamp(date_str)
             try:
                 result = self.calculate_abnormal_returns(data, election_date)
                 all_results.append({
-                    "Election_Date": election_date.strftime("%Y-%m-%d"),
+                    "Election_Year": year,
+                    "Election_Date": date_str,
                     "Alpha": result["alpha"],
                     "Beta": result["beta"],
                     "R_Squared": result["r_squared"],
@@ -1086,10 +1088,11 @@ This upgraded project is useful in both risk management and fraud analytics:
                 })
                 
                 event_df = result["event_data"].copy()
-                event_df["Election_Date"] = election_date
+                event_df["Election_Year"] = year
+                event_df["Election_Date"] = date_str
                 all_event_data.append(event_df)
             except Exception as e:
-                self._record_note(f"Skipped {election_date}: {str(e)}")
+                self._record_note(f"Skipped {year} ({date_str}): {str(e)}")
         
         return pd.DataFrame(all_results), pd.concat(all_event_data, ignore_index=False) if all_event_data else pd.DataFrame()
 
@@ -1129,7 +1132,8 @@ This upgraded project is useful in both risk management and fraud analytics:
         """Analyze NIFTY vs USD/INR correlation during election windows."""
         correlations = []
         
-        for election_date in self.config.election_dates:
+        for year, date_str in self.config.election_dates.items():
+            election_date = pd.Timestamp(date_str)
             window_start = election_date - pd.Timedelta(days=20)
             window_end = election_date + pd.Timedelta(days=40)
             window_data = data.loc[window_start:window_end, ["NIFTY_Return", "USDINR_Return"]].dropna()
@@ -1137,7 +1141,8 @@ This upgraded project is useful in both risk management and fraud analytics:
             if len(window_data) > 10:
                 corr = window_data.corr().iloc[0, 1]
                 correlations.append({
-                    "Election_Date": election_date.strftime("%Y-%m-%d"),
+                    "Election_Year": year,
+                    "Election_Date": date_str,
                     "Correlation": float(corr),
                     "Window_Size": len(window_data),
                 })
@@ -1148,7 +1153,8 @@ This upgraded project is useful in both risk management and fraud analytics:
         """Plot normalized price paths for all elections."""
         fig, ax = plt.subplots(figsize=(15, 7))
         
-        for election_date in self.config.election_dates:
+        for year, date_str in self.config.election_dates.items():
+            election_date = pd.Timestamp(date_str)
             window_start = election_date - pd.Timedelta(days=20)
             window_end = election_date + pd.Timedelta(days=40)
             window_data = data.loc[window_start:window_end, "NIFTY_Close"].dropna()
@@ -1161,7 +1167,7 @@ This upgraded project is useful in both risk management and fraud analytics:
                 ax.plot(
                     days_from_election,
                     normalized.values,
-                    label=election_date.strftime("%Y"),
+                    label=str(year),
                     alpha=0.7,
                     linewidth=2,
                 )
@@ -1179,14 +1185,17 @@ This upgraded project is useful in both risk management and fraud analytics:
         """Plot CAR progression for all elections."""
         fig, ax = plt.subplots(figsize=(15, 7))
         
-        for election_date in self.config.election_dates:
-            election_data = car_detail[car_detail["Election_Date"] == election_date]
+        for year, date_str in self.config.election_dates.items():
+            election_data = car_detail[
+                (car_detail["Election_Year"] == year) | (car_detail["Election_Date"] == date_str)
+            ]
             if not election_data.empty and "CAR" in election_data.columns:
+                election_date = pd.Timestamp(date_str)
                 days_from_election = (election_data.index - election_date).days
                 ax.plot(
                     days_from_election,
                     election_data["CAR"],
-                    label=election_date.strftime("%Y"),
+                    label=str(year),
                     alpha=0.7,
                     linewidth=2,
                 )
