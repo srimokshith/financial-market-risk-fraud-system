@@ -6,4 +6,4 @@ statsmodels
 scikit-learn
 arch
 yfinance
-streamlit
+streamlit>=1.28.0
